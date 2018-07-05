@@ -14,7 +14,7 @@ uint8_t register_param(uint8_t *buffer)
         os_memcpy(parameters.pub_key, buffer, 33);
         buffer+=33;
 
-        os_memcpy(parameters.release_time, buffer, 4);
+        os_memcpy(&parameters.release_blocks_num, buffer, 4);
         buffer+=4;
 
         os_memcpy(parameters.first_block_hash, buffer, 32);

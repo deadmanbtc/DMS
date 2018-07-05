@@ -7,7 +7,7 @@ typedef struct DMS_parameters_t {
 
     uint8_t initialized;
     uint8_t pub_key[33];
-    uint8_t release_time[4];
+    uint32_t release_blocks_num;
     uint8_t first_block_hash[32];
     uint8_t secret[64];
 } DMS_parameters_t;

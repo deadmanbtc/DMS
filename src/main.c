@@ -21,6 +21,7 @@
 #include "os_io_seproxyhal.h"
 #include "register.h"
 #include "start_check.h"
+#include "parse_tx.h"
 
 unsigned char G_io_seproxyhal_spi_buffer[IO_SEPROXYHAL_BUFFER_SIZE_B];
 
@@ -58,8 +59,6 @@ static void ui_approval(void);
 #define INS_START_CHECK 0x02
 #define INS_STREAM_BLOCK 0x03
 #define INS_STREAM_TX 0x04
-#define P1_LAST 0x80
-#define P1_MORE 0x00
 
 #define OFFSET_CLA 0
 #define OFFSET_INS 1
@@ -399,7 +398,7 @@ static void sample_main(void) {
                         if(register_param(&G_io_apdu_buffer[OFFSET_CDATA])) THROW(ERR_ALREADY_REGISTERED);
 
                         PRINTF("Registered pub_key: %.*H\n", 32, N_storage.pub_key);
-                        PRINTF("Registered release time: %.*H\n", 4, N_storage.release_time);
+                        PRINTF("Registered number of block before secret release: %d\n", N_storage.release_blocks_num);
                         PRINTF("First block hash: %.*H\n", 32, N_storage.first_block_hash);
                         PRINTF("Registered secret: %.*H\n", 64, N_storage.secret);
                         
@@ -408,7 +407,11 @@ static void sample_main(void) {
                 
                     case INS_START_CHECK:
                     {
-                        if(N_storage.initialized != 1) THROW(ERR_NVRAM_NOT_INITIALIZED);
+                        if(N_storage.initialized != 1) 
+                        {
+                            check_ctx.machine_state=UNINITIALIZED;
+                            THROW(ERR_NVRAM_NOT_INITIALIZED);
+                        }
 
                         init_check_ctx();
                         os_memcpy(G_io_apdu_buffer, check_ctx.current_block_hash, 32);
@@ -418,19 +421,52 @@ static void sample_main(void) {
 
                     case INS_STREAM_BLOCK:
                     {
-                        if(check_ctx.machine_state != WAITING_FOR_BLOCK) THROW(ERR_WRONG_STATE_TRANSITION);
+                        if(check_ctx.machine_state != WAITING_FOR_BLOCK)
+                        {
+                            check_ctx.machine_state=UNINITIALIZED;
+                             THROW(ERR_WRONG_STATE_TRANSITION);
+                        }
 
-                        parse_block_header(G_io_apdu_buffer[OFFSET_CDATA]);
-                        os_memcpy(G_io_apdu_buffer, &check_ctx.tx_parsed, 2);
-                        tx+=2;
+                        parse_block_header(&G_io_apdu_buffer[OFFSET_CDATA]);
+
                         THROW(0x9000);
                     }
 
                     case INS_STREAM_TX:
                     {
-                        if(check_ctx.machine_state != WAITING_FOR_BLOCK) THROW(ERR_WRONG_STATE_TRANSITION);
+                        if(check_ctx.machine_state != WAITING_FOR_TX)
+                        {
+                            check_ctx.machine_state=UNINITIALIZED;
+                            THROW(ERR_WRONG_STATE_TRANSITION);
+                        } 
+                        if((G_io_apdu_buffer[OFFSET_P1] != P1_LAST && G_io_apdu_buffer[OFFSET_P1] != P1_MORE) 
+                          || (G_io_apdu_buffer[OFFSET_P2] != P2_SEGWIT && G_io_apdu_buffer[OFFSET_P2] != P2_NO_SEGWIT))
+                        {
+                            check_ctx.machine_state=UNINITIALIZED;
+                            THROW(ERR_WRONG_TX_FLAGS);
+                        }
 
+                        tx += parse_tx(&G_io_apdu_buffer[OFFSET_CDATA], G_io_apdu_buffer[OFFSET_P1], G_io_apdu_buffer[OFFSET_P2]);
+
+                        if(check_ctx.tx_remaining_in_block == 0)
+                        {
+                            // TODO: build Merkle tree to validate block
+
+                            check_ctx.blocks_elapsed += 1;
+
+                            if(check_ctx.if_block_valid_reset_counter == 1)
+                            {
+                                check_ctx.blocks_elapsed = 0;
+                            }
+                            if(check_ctx.blocks_elapsed >= N_storage.release_blocks_num)
+                            {
+                                PRINTF("KRAKEN RELEAAAASED\n")
+                                os_memcpy(G_io_apdu_buffer, N_storage.secret, 64);
+                                tx = 64;
+                            }
+                        }
                         
+                        THROW(0x9000);
                     }
 
 
@@ -604,7 +640,7 @@ __attribute__((section(".boot"))) int main(void) {
         TRY {
             io_seproxyhal_init();
 
-            check_ctx.state = UNINITIALIZED;
+            check_ctx.machine_state = UNINITIALIZED;
 
 #ifdef LISTEN_BLE
             if (os_seph_features() &
